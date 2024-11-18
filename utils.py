@@ -6,8 +6,10 @@ import torch.utils.data
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 from torch.utils.data import Dataset, TensorDataset
-from scipy import linalg
+from scipy import linalg, stats 
+from torch.nn.functional import adaptive_avg_pool2d
 
+import os 
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -26,13 +28,28 @@ def get_dataset(dataset_name, dataroot, imageSize, is_train=True, drop_rate=0.0,
     if dataset_name == 'cifar10':
         dataset = dset.CIFAR10(
             train=is_train,
-            root=dataroot, download=False,
+            download=True,
+            root=dataroot,
             transform=transforms.Compose([
                 transforms.Resize(imageSize),
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                 Occlude(drop_rate=drop_rate, tile_size=tile_size),
             ]))
+        unorm = UnNormalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+        img_channels = 3
+    elif dataset_name == "cifar100":
+        dataset = dset.CIFAR100(
+            train = is_train, 
+            download = True, 
+            root = dataroot, 
+            transform = transforms.Compose([
+                transforms.Resize(imageSize),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                Occlude(drop_rate=drop_rate, tile_size=tile_size),
+            ])
+        )
         unorm = UnNormalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
         img_channels = 3
 
@@ -107,13 +124,14 @@ class UnNormalize(object):
         self.mean = mean
         self.std = std
 
-    def __call__(self, tensorBatch):
+    def __call__(self, tB):
         """
         Args:
             tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
         Returns:
             Tensor: Normalized image.
         """
+        tensorBatch = tB.clone() 
         for i in range(len(tensorBatch)):
             for j in range(len(tensorBatch[i])):
                 tensorBatch[i][j].mul_(self.std[j]).add_(self.mean[j])
@@ -123,30 +141,54 @@ class UnNormalize(object):
 
 def save_fig_losses(epoch, d_losses, g_losses, r_losses_real, r_losses_fake, kl_losses, fid_NREM, fid_REM,  dir_files):
     e = np.arange(0, epoch+1)
-    fig = plt.figure(figsize=(10,5))
+    fig = plt.figure(figsize=(12, 6))
+    plt.style.use('ggplot')  # Use a style for a cleaner look
+    
+    
     ax1 = fig.add_subplot(121)
     if g_losses is not None:
-        ax1.plot(e, g_losses, label='generator (REM)')
+        ax1.plot(e, g_losses, label='Generator (REM)', linewidth=1.5, marker='x')
     if d_losses is not None:
-        ax1.plot(e, d_losses, color='green', label='discriminator (Wake, REM)')
+        ax1.plot(e, d_losses, color='green', label='Discriminator (Wake, REM)', linewidth=1.5, marker='x')
     #ax1.set_ylim(0, 10)
-    ax1.set_xlabel('epochs')
-    ax1.set_ylabel('loss')
-    ax1.set_title('losses with training')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Losses during training')
+    ax1.grid(visible=True, which='both', linestyle='--', alpha=0.7)  # Grid for granularity
+    
+    # Set granular y-axis ticks
+    max_loss = max(np.nanmax(d_losses), np.nanmax(g_losses), np.nanmax(r_losses_real or [0]), 
+                   np.nanmax(r_losses_fake or [0]), np.nanmax(kl_losses or [0])) + 0.1
+    ax1.set_yticks(np.arange(- max_loss, max_loss, 0.1))
+    
+    
+    # Optional loss plots
     if r_losses_real is not None:
-        ax1.plot(e, r_losses_real, color='orange', label='data rec. (Wake)')
+        ax1.plot(e, r_losses_real, color='orange', label='Data Rec. (Wake)', linestyle='-', alpha=0.8, marker='x')
     if r_losses_fake is not None:
-        ax1.plot(e, r_losses_fake, color='magenta', label='latent rec. (NREM)')
+        ax1.plot(e, r_losses_fake, color='magenta', label='Latent Rec. (NREM)', linestyle='-', alpha=0.8,  marker='x')
     if kl_losses is not None:
-        ax1.plot(e, kl_losses, color='brown', label='KL div. (Wake)')
+        ax1.plot(e, kl_losses, color='brown', label='KL Div. (Wake)', linestyle='-', alpha=0.8,  marker='x')
     ax1.legend()
     
+    # Subplot for FID scores if available
     if fid_NREM is not None and fid_REM is not None:
         ax2 = fig.add_subplot(122)
-        ax2.plot(e, fid_NREM, color='darkorange', label='FID NREM')
-        ax2.plot(e, fid_REM, color='magenta', label='FID REM')
+        ax2.plot(e, fid_NREM, color='darkorange', label='FID NREM', linewidth=1.5,  marker='x')
+        ax2.plot(e, fid_REM, color='magenta', label='FID REM', linewidth=1.5,  marker='x')
+        ax2.set_xlabel('Epochs')
+        ax2.set_ylabel('FID Score')
+        ax2.set_title('FID Scores during Training')
         ax2.legend()
-    fig.savefig(dir_files+'/losses.pdf')
+        ax2.grid(visible=True, which='both', linestyle='--', alpha=0.7)  # Grid for granularity
+    try:
+        os.makedirs(dir_files + "/loss", exist_ok=True)
+    except OSError:
+        pass
+    
+    fig.tight_layout()
+    fig.savefig(f"{dir_files}/loss/training_losses.png")
+    plt.close(fig)
 
 
 def save_fig_trainval(epoch, all_losses, all_accuracies, dir_files):
@@ -231,21 +273,14 @@ def calculate_activation_statistics(images,model,batch_size=128, dims=2048,
         batch=images
     pred = model(batch)[0]
     
-
-        # If model output is not scalar, apply global spatial average pooling.
-        # This happens if you choose a dimensionality not equal 2048.
     if pred.size(2) != 1 or pred.size(3) != 1:
         pred = adaptive_avg_pool2d(pred, output_size=(1, 1))
     act= pred.cpu().data.numpy().reshape(pred.size(0), -1)
     return act 
-    
-    mu = np.mean(act, axis=0)
-    sigma = np.cov(act, rowvar=False)
-    return mu, sigma
+
     
     
-    
-def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
+def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-4):
     """Numpy implementation of the Frechet Distance.
     The Frechet distance between two multivariate Gaussians X_1 ~ N(mu_1, C_1)
     and X_2 ~ N(mu_2, C_2) is
@@ -255,8 +290,8 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     mu1 = np.atleast_1d(mu1)
     mu2 = np.atleast_1d(mu2)
 
-    sigma1 = np.atleast_2d(sigma1)
-    sigma2 = np.atleast_2d(sigma2)
+    sigma1 = np.atleast_2d(sigma1) 
+    sigma2 = np.atleast_2d(sigma2) 
 
     assert mu1.shape == mu2.shape, \
         'Training and test mean vectors have different lengths'
@@ -267,6 +302,7 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
 
     
     covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+    
     if not np.isfinite(covmean).all():
         msg = ('fid calculation produces singular product; '
                'adding %s to diagonal of cov estimates') % eps

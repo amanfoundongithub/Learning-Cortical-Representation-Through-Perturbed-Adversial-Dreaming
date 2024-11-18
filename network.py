@@ -157,8 +157,6 @@ class InputClassifier(nn.Module):
 
 
 
-
-
 class InceptionV3(nn.Module):
     """Pretrained InceptionV3 network returning feature maps"""
 

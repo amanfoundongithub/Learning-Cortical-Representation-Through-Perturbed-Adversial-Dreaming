@@ -1,0 +1,9 @@
+__pycache__/
+
+checkpoint/
+
+cifar10/
+
+cifar100/
+
+result/
